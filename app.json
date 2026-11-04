@@ -1,0 +1,45 @@
+{
+  "name": "Telegram All Media Downloader Bot",
+  "description": "Premium All-in-One Downloader Bot with Force Sub, Logger Group, Broadcast, Statistics, and Custom Welcome Message.",
+  "repository": "https://github.com/VBIT-BOT-ADDA/All-Downloader-Bot",
+  "keywords": ["python", "telegram", "downloader", "ytdlp", "pyrogram"],
+  "stack": "container",
+  "env": {
+    "API_ID": {
+      "description": "Your Telegram API_ID from my.telegram.org",
+      "value": ""
+    },
+    "API_HASH": {
+      "description": "Your Telegram API_HASH from my.telegram.org",
+      "value": ""
+    },
+    "BOT_TOKEN": {
+      "description": "Your Telegram Bot Token from @BotFather",
+      "value": ""
+    },
+    "MONGO_DB_URI": {
+      "description": "MongoDB Connection URI for saving users",
+      "value": ""
+    },
+    "OWNER_ID": {
+      "description": "Your Telegram User ID for admin/broadcast/stats commands",
+      "value": ""
+    },
+    "LOG_CHANNEL": {
+      "description": "Telegram Logger Group or Channel ID where new user details will be sent (e.g., -100xxxxxxxxxx)",
+      "value": ""
+    },
+    "CHANNEL_ID": {
+      "description": "Force Sub Channel ID (e.g., -100xxxxxxxxxx or @channelname)",
+      "value": ""
+    },
+    "CHANNEL_USERNAME": {
+      "description": "Force Sub Channel Username without @ (e.g., channelname)",
+      "value": ""
+    },
+    "WELCOME_TEXT": {
+      "description": "Custom Welcome Message for the Bot",
+      "value": "👋 **Welcome to the Ultimate Media Downloader Bot!**\n\n✨ **Supported Platforms:**\n• Instagram (Reels, Videos, Posts, Stories)\n• Facebook (Videos, Reels, Posts, Stories)\n• YouTube (Shorts & Long Videos)\n\n🚀 **How to use:**\nJust send any valid media link here, and I will download and send it to you in HD quality instantly!"
+    }
+  }
+}
