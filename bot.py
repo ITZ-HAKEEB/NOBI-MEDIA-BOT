@@ -1,8 +1,9 @@
 import os
-import asyncio
 import re
 import html
+import asyncio
 import logging
+import tempfile
 
 from pyrogram import Client, filters, enums
 from pyrogram.types import (
@@ -11,6 +12,7 @@ from pyrogram.types import (
     Message,
     CallbackQuery
 )
+
 from motor.motor_asyncio import AsyncIOMotorClient
 import yt_dlp
 import config
@@ -29,16 +31,18 @@ logger = logging.getLogger(__name__)
 
 
 # ==========================================================
-# DATABASE INITIALIZATION
+# DATABASE
 # ==========================================================
 
 db_client = AsyncIOMotorClient(config.MONGO_DB_URI)
+
 db = db_client["all_downloader_bot"]
+
 users_col = db["users"]
 
 
 # ==========================================================
-# BOT INITIALIZATION
+# BOT
 # ==========================================================
 
 app = Client(
@@ -62,8 +66,6 @@ DEFAULT_WELCOME_TEXT = """
 
 ━━━━━━━━━━━━━━━━━━
 
-✧ sᴇɴᴅ ᴀ ᴠɪᴅᴇᴏ ʟɪɴᴋ ᴛᴏ ɢᴇᴛ sᴛᴀʀᴛᴇᴅ.
-
 ✧ sᴜᴘᴘᴏʀᴛᴇᴅ ᴘʟᴀᴛғᴏʀᴍs:
 
 • ɪɴsᴛᴀɢʀᴀᴍ
@@ -76,7 +78,7 @@ DEFAULT_WELCOME_TEXT = """
 🎬 ʜɪɢʜ Qᴜᴀʟɪᴛʏ ᴠɪᴅᴇᴏs
 🔒 sɪᴍᴘʟᴇ & ᴇᴀsʏ ᴛᴏ ᴜsᴇ
 
-<b>➥ ɴᴏᴡ sᴇɴᴅ ʏᴏᴜʀ ʟɪɴᴋ!</b>
+<b>➥ sᴇɴᴅ ʏᴏᴜʀ ᴠɪᴅᴇᴏ ʟɪɴᴋ!</b>
 </blockquote>
 """
 
@@ -87,10 +89,10 @@ WELCOME_TEXT = (
 
 
 # ==========================================================
-# CHANNEL IDENTIFIER HELPERS
+# FORCE SUBSCRIPTION
 # ==========================================================
 
-def normalize_channel_username(value):
+def normalize_channel(value):
 
     if not value:
         return None
@@ -100,80 +102,52 @@ def normalize_channel_username(value):
     value = value.replace("https://t.me/", "")
     value = value.replace("http://t.me/", "")
     value = value.replace("t.me/", "")
-    value = value.split("/")[0]
-    value = value.split("?")[0]
-    value = value.strip()
+    value = value.split("/")[0].split("?")[0]
 
     if not value:
         return None
 
-    if value.startswith("-100") or value.lstrip("-").isdigit():
-        try:
-            return int(value)
-        except ValueError:
-            return value
+    if value.lstrip("-").isdigit():
+        return int(value)
 
-    if not value.startswith("@"):
-        value = "@" + value
-
-    return value
+    return value if value.startswith("@") else f"@{value}"
 
 
 def get_channel_candidates():
 
     candidates = []
 
-    channel_id = getattr(config, "CHANNEL_ID", None)
-    channel_username = getattr(
-        config,
-        "CHANNEL_USERNAME",
-        None
+    channel_id = normalize_channel(
+        getattr(config, "CHANNEL_ID", None)
     )
 
-    # First try configured numeric channel ID
-
-    if channel_id:
-
-        channel_id = str(channel_id).strip()
-
-        try:
-            if channel_id.lstrip("-").isdigit():
-                candidates.append(int(channel_id))
-            else:
-                candidates.append(channel_id)
-        except Exception:
-            candidates.append(channel_id)
-
-    # Also try username as a fallback
-
-    username = normalize_channel_username(
-        channel_username
+    channel_username = normalize_channel(
+        getattr(config, "CHANNEL_USERNAME", None)
     )
 
-    if username and username not in candidates:
-        candidates.append(username)
+    if channel_id is not None:
+        candidates.append(channel_id)
+
+    if (
+        channel_username is not None
+        and channel_username not in candidates
+    ):
+        candidates.append(channel_username)
 
     return candidates
 
 
 def get_join_url():
 
-    username = normalize_channel_username(
+    username = normalize_channel(
         getattr(config, "CHANNEL_USERNAME", None)
     )
 
-    if not username:
-        return None
-
-    if isinstance(username, int):
+    if not username or isinstance(username, int):
         return None
 
     return f"https://t.me/{username.lstrip('@')}"
 
-
-# ==========================================================
-# FORCE SUBSCRIPTION KEYBOARD
-# ==========================================================
 
 def get_join_keyboard():
 
@@ -182,7 +156,6 @@ def get_join_keyboard():
     join_url = get_join_url()
 
     if join_url:
-
         buttons.append([
             InlineKeyboardButton(
                 "📢 ᴊᴏɪɴ ᴜᴘᴅᴀᴛᴇ ᴄʜᴀɴɴᴇʟ",
@@ -200,109 +173,65 @@ def get_join_keyboard():
     return InlineKeyboardMarkup(buttons)
 
 
-# ==========================================================
-# FORCE SUBSCRIPTION CHECK - FIXED
-# ==========================================================
-
-async def is_subscribed(client: Client, user_id: int) -> bool:
+async def is_subscribed(client, user_id):
 
     candidates = get_channel_candidates()
 
     if not candidates:
-
-        logger.warning(
-            "CHANNEL_ID and CHANNEL_USERNAME are not configured!"
-        )
-
+        logger.warning("Force subscription channel not configured")
         return True
 
     for channel in candidates:
 
         try:
 
-            logger.info(
-                "Checking membership: user=%s channel=%s",
-                user_id,
-                channel
-            )
-
             member = await client.get_chat_member(
-                chat_id=channel,
-                user_id=user_id
+                channel,
+                user_id
             )
 
             status = member.status
 
-            # Pyrogram enum compatibility
-
             status_name = getattr(status, "name", None)
 
-            if status_name:
-                status_name = str(status_name).lower()
-            else:
-                status_name = str(status).lower().split(".")[-1]
+            if not status_name:
+                status_name = str(status).split(".")[-1]
 
-            allowed_statuses = {
+            status_name = status_name.lower()
+
+            if status_name in (
                 "member",
                 "administrator",
                 "owner",
                 "creator"
-            }
-
-            if status_name in allowed_statuses:
+            ):
 
                 logger.info(
-                    "SUBSCRIPTION SUCCESS: user=%s channel=%s status=%s",
+                    "User %s verified in %s",
                     user_id,
-                    channel,
-                    status_name
+                    channel
                 )
 
                 return True
 
-            logger.warning(
-                "User %s not found as member in %s. Status=%s",
-                user_id,
-                channel,
-                status_name
-            )
-
-            # Try the next channel identifier too.
-            continue
-
-        except Exception as e:
+        except Exception:
 
             logger.exception(
-                "Membership API failed for channel %s: %s",
-                channel,
-                e
+                "Membership check failed for channel %s",
+                channel
             )
-
-            continue
-
-    logger.warning(
-        "SUBSCRIPTION FAILED for user %s. Checked channels: %s",
-        user_id,
-        candidates
-    )
 
     return False
 
 
-# ==========================================================
-# SEND JOIN MESSAGE
-# ==========================================================
-
-async def send_join_message(message: Message):
+async def send_join_message(message):
 
     await message.reply_text(
         """
 <blockquote>
 <b>🔐 ᴄʜᴀɴɴᴇʟ ᴠᴇʀɪғɪᴄᴀᴛɪᴏɴ</b>
 
-ᴜsᴇ ᴏғ ᴛʜɪs ʙᴏᴛ ʀᴇǫᴜɪʀᴇs ᴏᴜʀ ᴏғғɪᴄɪᴀʟ ᴄʜᴀɴɴᴇʟ ᴍᴇᴍʙᴇʀsʜɪᴘ.
-
-━━━━━━━━━━━━━━━━━━
+ᴛᴏ ᴜsᴇ ᴛʜɪs ʙᴏᴛ, ᴘʟᴇᴀsᴇ ᴊᴏɪɴ ᴏᴜʀ ᴏғғɪᴄɪᴀʟ ᴄʜᴀɴɴᴇʟ.
 
 ➜ ᴊᴏɪɴ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ.
 ➜ ᴄʟɪᴄᴋ ᴠᴇʀɪғʏ & ᴄᴏɴᴛɪɴᴜᴇ.
@@ -316,24 +245,14 @@ async def send_join_message(message: Message):
 
 
 # ==========================================================
-# START COMMAND
+# START
 # ==========================================================
 
 @app.on_message(filters.command("start") & filters.private)
-async def start_command(client: Client, message: Message):
+async def start_command(client, message):
 
     user = message.from_user
-
     user_id = user.id
-    user_name = html.escape(user.first_name or "Unknown")
-    username = user.username
-
-    username_str = (
-        f"@{html.escape(username)}"
-        if username else "None"
-    )
-
-    # Register user
 
     user_doc = await users_col.find_one(
         {"user_id": user_id}
@@ -347,36 +266,41 @@ async def start_command(client: Client, message: Message):
                 "$set": {
                     "user_id": user_id,
                     "first_name": user.first_name,
-                    "username": username
+                    "username": user.username
                 }
             },
             upsert=True
         )
 
-        # New user logger
+        log_channel = getattr(
+            config,
+            "LOG_CHANNEL",
+            None
+        )
 
-        if getattr(config, "LOG_CHANNEL", None):
+        if log_channel:
 
-            log_msg = (
-                "<b>👤 ɴᴇᴡ ᴜsᴇʀ sᴛᴀʀᴛᴇᴅ ᴛʜᴇ ʙᴏᴛ!</b>\n\n"
-                f"• <b>ɴᴀᴍᴇ:</b> {user_name}\n"
-                f"• <b>ᴜsᴇʀɴᴀᴍᴇ:</b> {username_str}\n"
-                f"• <b>ᴜsᴇʀ ɪᴅ:</b> <code>{user_id}</code>"
+            name = html.escape(user.first_name or "Unknown")
+
+            username = (
+                f"@{html.escape(user.username)}"
+                if user.username else "None"
             )
 
             try:
 
                 await client.send_message(
-                    config.LOG_CHANNEL,
-                    log_msg
+                    log_channel,
+                    (
+                        "<b>👤 ɴᴇᴡ ᴜsᴇʀ</b>\n\n"
+                        f"• ɴᴀᴍᴇ: {name}\n"
+                        f"• ᴜsᴇʀɴᴀᴍᴇ: {username}\n"
+                        f"• ɪᴅ: <code>{user_id}</code>"
+                    )
                 )
 
-            except Exception as e:
-
-                logger.error(
-                    "New user log failed: %s",
-                    e
-                )
+            except Exception:
+                logger.exception("New user log failed")
 
     else:
 
@@ -385,87 +309,69 @@ async def start_command(client: Client, message: Message):
             {
                 "$set": {
                     "first_name": user.first_name,
-                    "username": username
+                    "username": user.username
                 }
-            },
-            upsert=True
+            }
         )
-
-    # Force subscription
 
     if not await is_subscribed(client, user_id):
 
         await send_join_message(message)
         return
 
-    # Welcome menu
-
     await message.reply_text(WELCOME_TEXT)
 
 
 # ==========================================================
-# VERIFY CALLBACK - FIXED
+# VERIFY BUTTON
 # ==========================================================
 
 @app.on_callback_query(filters.regex(r"^check_sub$"))
-async def check_subscription_callback(
-    client: Client,
-    callback: CallbackQuery
-):
+async def check_subscription_callback(client, callback):
 
     user_id = callback.from_user.id
-
-    # Prevent old callback errors
-
-    await callback.answer(
-        "🔄 Checking your channel membership...",
-        show_alert=False
-    )
 
     subscribed = await is_subscribed(
         client,
         user_id
     )
 
-    if subscribed:
-
-        success_text = """
-<blockquote>
-<b>🎉 ᴠᴇʀɪғɪᴄᴀᴛɪᴏɴ sᴜᴄᴄᴇssғᴜʟ!</b>
-
-✦ ʏᴏᴜ ʜᴀᴠᴇ ʙᴇᴇɴ ᴠᴇʀɪғɪᴇᴅ.
-
-✦ ɴᴏᴡ ʏᴏᴜ ᴄᴀɴ ᴜsᴇ ᴛʜᴇ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ.
-
-➥ sᴇɴᴅ ʏᴏᴜʀ ᴠɪᴅᴇᴏ ʟɪɴᴋ ɴᴏᴡ!
-</blockquote>
-"""
-
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-
-        await callback.message.reply_text(
-            success_text
-        )
-
-        # Send welcome menu after verification
-
-        await callback.message.reply_text(
-            WELCOME_TEXT
-        )
-
-    else:
+    if not subscribed:
 
         await callback.answer(
-            "❌ Membership not detected! Join the correct channel and try again.",
+            "❌ Join the correct channel first!",
             show_alert=True
         )
 
+        return
+
+    await callback.answer(
+        "✅ Verification successful!"
+    )
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await callback.message.reply_text(
+        """
+<blockquote>
+<b>🎉 ᴠᴇʀɪғɪᴄᴀᴛɪᴏɴ sᴜᴄᴄᴇssғᴜʟ!</b>
+
+✦ ʏᴏᴜ ᴀʀᴇ ɴᴏᴡ ᴠᴇʀɪғɪᴇᴅ.
+✦ ᴇɴᴊᴏʏ ᴏᴜʀ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ!
+</blockquote>
+        """
+    )
+
+    await callback.message.reply_text(
+        WELCOME_TEXT
+    )
+
 
 # ==========================================================
-# STATISTICS COMMAND - OWNER ONLY
+# STATISTICS
 # ==========================================================
 
 @app.on_message(
@@ -473,10 +379,7 @@ async def check_subscription_callback(
     & filters.private
     & filters.user(config.OWNER_ID)
 )
-async def statistics_command(
-    client: Client,
-    message: Message
-):
+async def statistics_command(client, message):
 
     total_users = await users_col.count_documents({})
 
@@ -488,7 +391,7 @@ async def statistics_command(
 👥 ᴛᴏᴛᴀʟ ᴜsᴇʀs:
 <code>{total_users}</code>
 
-✦ ᴅᴀᴛᴀʙᴀsᴇ: ᴄᴏɴɴᴇᴄᴛᴇᴅ
+✦ ᴅᴀᴛᴀʙᴀsᴇ: ᴍᴏɴɢᴏᴅʙ
 ✦ sᴛᴀᴛᴜs: ᴀᴄᴛɪᴠᴇ
 </blockquote>
         """
@@ -496,7 +399,7 @@ async def statistics_command(
 
 
 # ==========================================================
-# BROADCAST COMMAND - OWNER ONLY
+# BROADCAST
 # ==========================================================
 
 @app.on_message(
@@ -504,62 +407,55 @@ async def statistics_command(
     & filters.private
     & filters.user(config.OWNER_ID)
 )
-async def broadcast_command(
-    client: Client,
-    message: Message
-):
+async def broadcast_command(client, message):
 
     if not message.reply_to_message:
 
         await message.reply_text(
             "⚠️ ᴘʟᴇᴀsᴇ ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴍᴇssᴀɢᴇ ᴛᴏ ʙʀᴏᴀᴅᴄᴀsᴛ."
         )
+
         return
 
     broadcast_msg = message.reply_to_message
 
-    users_cursor = users_col.find({})
-
     total_users = await users_col.count_documents({})
 
     status_msg = await message.reply_text(
-        f"🚀 ʙʀᴏᴀᴅᴄᴀsᴛ sᴛᴀʀᴛᴇᴅ!\n\nᴛᴏᴛᴀʟ ᴜsᴇʀs: <code>{total_users}</code>"
+        f"🚀 ʙʀᴏᴀᴅᴄᴀsᴛ sᴛᴀʀᴛᴇᴅ!\nᴛᴏᴛᴀʟ: <code>{total_users}</code>"
     )
 
     success = 0
     failed = 0
 
-    async for user in users_cursor:
-
-        uid = user["user_id"]
+    async for user in users_col.find({}):
 
         try:
 
-            await broadcast_msg.copy(chat_id=uid)
+            await broadcast_msg.copy(
+                chat_id=user["user_id"]
+            )
 
             success += 1
 
             await asyncio.sleep(0.1)
 
-        except Exception as e:
+        except Exception:
 
             failed += 1
 
-            logger.warning(
-                "Broadcast failed for %s: %s",
-                uid,
-                e
+            logger.exception(
+                "Broadcast failed for %s",
+                user["user_id"]
             )
 
     await status_msg.edit_text(
         f"""
 <blockquote>
-<b>✅ ʙʀᴏᴀᴅᴄᴀsᴛ ᴄᴏᴍᴘʟᴇᴛᴇᴅ!</b>
+<b>✅ ʙʀᴏᴀᴅᴄᴀsᴛ ᴄᴏᴍᴘʟᴇᴛᴇᴅ</b>
 
 👥 ᴛᴏᴛᴀʟ: <code>{total_users}</code>
-
 ✅ sᴜᴄᴄᴇss: <code>{success}</code>
-
 ❌ ғᴀɪʟᴇᴅ: <code>{failed}</code>
 </blockquote>
         """
@@ -567,24 +463,169 @@ async def broadcast_command(
 
 
 # ==========================================================
-# LINK HANDLER - MEDIA DOWNLOADER
+# YT-DLP COOKIE CONFIGURATION
+# ==========================================================
+
+def get_ytdlp_cookie_file():
+
+    # Optional cookie contents supplied through Heroku Config Vars.
+    # Use only your own account's cookies and keep them private.
+
+    cookie_data = os.getenv("YTDLP_COOKIES", "").strip()
+
+    if cookie_data:
+
+        cookie_path = "/tmp/nobi_instagram_cookies.txt"
+
+        with open(cookie_path, "w", encoding="utf-8") as file:
+            file.write(cookie_data)
+
+        return cookie_path
+
+    # Alternatively, use a securely provided cookie file path.
+
+    cookie_path = os.getenv(
+        "YTDLP_COOKIES_FILE",
+        ""
+    ).strip()
+
+    if cookie_path and os.path.isfile(cookie_path):
+        return cookie_path
+
+    return None
+
+
+# ==========================================================
+# DOWNLOAD FUNCTION
+# ==========================================================
+
+def download_media(url, download_dir):
+
+    cookie_file = get_ytdlp_cookie_file()
+
+    ydl_opts = {
+        "format": "best[ext=mp4]/best",
+        "outtmpl": os.path.join(
+            download_dir,
+            "%(id)s.%(ext)s"
+        ),
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": False,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+    }
+
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+
+        info = ydl.extract_info(
+            url,
+            download=True
+        )
+
+        if not info:
+            raise Exception("No downloadable media found.")
+
+        file_path = ydl.prepare_filename(info)
+
+        if not os.path.isfile(file_path):
+
+            # Handle a possible alternate extension.
+            base = os.path.splitext(file_path)[0]
+
+            matches = [
+                os.path.join(download_dir, name)
+                for name in os.listdir(download_dir)
+                if os.path.splitext(name)[0] == os.path.basename(base)
+            ]
+
+            if matches:
+                file_path = matches[0]
+
+        if not os.path.isfile(file_path):
+            raise Exception("Downloaded file was not found.")
+
+        return file_path
+
+
+# ==========================================================
+# ERROR MESSAGE HELPER
+# ==========================================================
+
+def get_download_error(error):
+
+    error = str(error)
+
+    lower_error = error.lower()
+
+    if any(word in lower_error for word in (
+        "rate-limit",
+        "rate limit",
+        "login required",
+        "cookies",
+        "requested content is not available"
+    )):
+
+        return (
+            "Instagram is requiring login or has temporarily "
+            "restricted this request.\n\n"
+            "Please try again later. If the content requires "
+            "login, configure your own authorized cookies securely."
+        )
+
+    if "private" in lower_error:
+
+        return (
+            "This content is private or unavailable to this account."
+        )
+
+    if "unsupported url" in lower_error:
+
+        return (
+            "This link is not supported by the current downloader."
+        )
+
+    if "ffmpeg" in lower_error:
+
+        return (
+            "The media requires FFmpeg. Please check your Heroku build."
+        )
+
+    return error[:1200]
+
+
+# ==========================================================
+# DOWNLOADER HANDLER
 # ==========================================================
 
 @app.on_message(
     filters.text
     & filters.private
-    & ~filters.command(["start", "broadcast", "statistics"])
+    & ~filters.command([
+        "start",
+        "broadcast",
+        "statistics"
+    ])
 )
-async def downloader_handler(
-    client: Client,
-    message: Message
-):
+async def downloader_handler(client, message):
+
+    if not message.from_user:
+        return
 
     user_id = message.from_user.id
 
     url = message.text.strip()
-
-    # URL validation
 
     url_pattern = re.compile(
         r"^https?://[^\s]+$",
@@ -594,21 +635,27 @@ async def downloader_handler(
     if not url_pattern.match(url):
         return
 
-    # Check subscription on every request
+    # Subscription check
 
     if not await is_subscribed(client, user_id):
 
         await send_join_message(message)
         return
 
-    # Processing message
+    # Processing status
 
     status_msg = await message.reply_text(
-        "📥 <b>ᴘʀᴏᴄᴇssɪɴɢ ʏᴏᴜʀ ᴠɪᴅᴇᴏ...</b>\n\n"
-        "✦ ᴘʟᴇᴀsᴇ ᴡᴀɪᴛ ᴀ ᴍᴏᴍᴇɴᴛ."
-    )
+        """
+<blockquote>
+📥 <b>ᴘʀᴏᴄᴇssɪɴɢ ʏᴏᴜʀ ᴠɪᴅᴇᴏ...</b>
 
-    # Eyes reaction
+✦ ʟɪɴᴋ ᴄʜᴇᴄᴋɪɴɢ
+✦ ᴍᴇᴅɪᴀ ᴘʀᴏᴄᴇssɪɴɢ
+
+ᴘʟᴇᴀsᴇ ᴡᴀɪᴛ!
+</blockquote>
+        """
+    )
 
     try:
         await message.react("👀")
@@ -622,72 +669,66 @@ async def downloader_handler(
         exist_ok=True
     )
 
-    ydl_opts = {
-        "format": "best[ext=mp4]/best",
-        "outtmpl": f"{download_dir}/%(id)s.%(ext)s",
-        "socket_timeout": 30,
-        "noplaylist": True,
-    }
+    file_path = None
 
     try:
 
         loop = asyncio.get_running_loop()
 
-        def download():
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-
-                info = ydl.extract_info(
-                    url,
-                    download=True
-                )
-
-                return ydl.prepare_filename(info)
-
         file_path = await loop.run_in_executor(
             None,
-            download
+            download_media,
+            url,
+            download_dir
         )
 
-        if file_path and os.path.exists(file_path):
+        if not file_path or not os.path.isfile(file_path):
+
+            raise Exception("Download file not found.")
+
+        await status_msg.edit_text(
+            "📤 <b>ᴜᴘʟᴏᴀᴅɪɴɢ ʏᴏᴜʀ ᴠɪᴅᴇᴏ...</b>"
+        )
+
+        await message.reply_video(
+            video=file_path,
+            caption=(
+                "✅ <b>ᴅᴏᴡɴʟᴏᴀᴅᴇᴅ sᴜᴄᴄᴇssғᴜʟʟʏ!</b>\n\n"
+                "✦ ᴘᴏᴡᴇʀᴇᴅ ʙʏ ɴᴏʙɪ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ"
+            )
+        )
+
+        await status_msg.delete()
+
+    except Exception as e:
+
+        logger.exception(
+            "Media download failed for user %s",
+            user_id
+        )
+
+        friendly_error = html.escape(
+            get_download_error(e)
+        )
+
+        try:
 
             await status_msg.edit_text(
-                "📤 <b>ᴜᴘʟᴏᴀᴅɪɴɢ ᴠɪᴅᴇᴏ...</b>\n\n"
-                "✦ ᴘʟᴇᴀsᴇ ᴡᴀɪᴛ."
+                "❌ <b>ᴅᴏᴡɴʟᴏᴀᴅ ᴇʀʀᴏʀ!</b>\n\n"
+                f"<blockquote>{friendly_error}</blockquote>"
             )
 
-            await message.reply_video(
-                video=file_path,
-                caption=(
-                    "✅ <b>ᴅᴏᴡɴʟᴏᴀᴅᴇᴅ sᴜᴄᴄᴇssғᴜʟʟʏ!</b>\n\n"
-                    "✦ ᴘᴏᴡᴇʀᴇᴅ ʙʏ ɴᴏʙɪ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ"
-                )
-            )
+        except Exception:
+            logger.exception("Could not edit download status")
 
-            await status_msg.delete()
+    finally:
+
+        if file_path and os.path.isfile(file_path):
 
             try:
                 os.remove(file_path)
             except Exception:
-                pass
-
-        else:
-
-            await status_msg.edit_text(
-                "❌ <b>ᴅᴏᴡɴʟᴏᴀᴅ ғᴀɪʟᴇᴅ!</b>\n\n"
-                "ᴘʟᴇᴀsᴇ ᴄʜᴇᴄᴋ ᴛʜᴇ ʟɪɴᴋ ᴀɴᴅ ᴛʀʏ ᴀɢᴀɪɴ."
-            )
-
-    except Exception as e:
-
-        logger.exception("Downloader error")
-
-        error_text = html.escape(str(e))
-
-        await status_msg.edit_text(
-            "❌ <b>ᴅᴏᴡɴʟᴏᴀᴅ ᴇʀʀᴏʀ!</b>\n\n"
-            f"<code>{error_text[:2500]}</code>"
-        )
+                logger.exception("Could not remove downloaded file")
 
 
 # ==========================================================
