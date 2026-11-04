@@ -1,7 +1,7 @@
 {
   "name": "Telegram All Media Downloader Bot",
   "description": "Premium All-in-One Downloader Bot with Force Sub, Logger Group, Broadcast, Statistics, and Custom Welcome Message.",
-  "repository": "https://github.com/VBIT-BOT-ADDA/All-Downloader-Bot",
+  "repository": "https://github.com/ITZ-HAKEEB/NOBI-MEDIA-BOT",
   "keywords": ["python", "telegram", "downloader", "ytdlp", "pyrogram"],
   "stack": "container",
   "env": {
