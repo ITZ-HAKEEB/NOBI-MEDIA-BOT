@@ -1,4 +1,3 @@
-
 import os
 import asyncio
 import re
@@ -34,7 +33,6 @@ logger = logging.getLogger(__name__)
 # ==========================================================
 
 db_client = AsyncIOMotorClient(config.MONGO_DB_URI)
-
 db = db_client["all_downloader_bot"]
 users_col = db["users"]
 
@@ -53,7 +51,7 @@ app = Client(
 
 
 # ==========================================================
-# STYLISH WELCOME MESSAGE
+# WELCOME MESSAGE
 # ==========================================================
 
 DEFAULT_WELCOME_TEXT = """
@@ -67,6 +65,7 @@ DEFAULT_WELCOME_TEXT = """
 ✧ sᴇɴᴅ ᴀ ᴠɪᴅᴇᴏ ʟɪɴᴋ ᴛᴏ ɢᴇᴛ sᴛᴀʀᴛᴇᴅ.
 
 ✧ sᴜᴘᴘᴏʀᴛᴇᴅ ᴘʟᴀᴛғᴏʀᴍs:
+
 • ɪɴsᴛᴀɢʀᴀᴍ
 • ғᴀᴄᴇʙᴏᴏᴋ
 • ʏᴏᴜᴛᴜʙᴇ
@@ -81,28 +80,109 @@ DEFAULT_WELCOME_TEXT = """
 </blockquote>
 """
 
-WELCOME_TEXT = getattr(config, "WELCOME_TEXT", None) or DEFAULT_WELCOME_TEXT
+WELCOME_TEXT = (
+    getattr(config, "WELCOME_TEXT", None)
+    or DEFAULT_WELCOME_TEXT
+)
 
 
 # ==========================================================
-# FORCE SUBSCRIPTION SETTINGS
+# CHANNEL IDENTIFIER HELPERS
 # ==========================================================
+
+def normalize_channel_username(value):
+
+    if not value:
+        return None
+
+    value = str(value).strip()
+
+    value = value.replace("https://t.me/", "")
+    value = value.replace("http://t.me/", "")
+    value = value.replace("t.me/", "")
+    value = value.split("/")[0]
+    value = value.split("?")[0]
+    value = value.strip()
+
+    if not value:
+        return None
+
+    if value.startswith("-100") or value.lstrip("-").isdigit():
+        try:
+            return int(value)
+        except ValueError:
+            return value
+
+    if not value.startswith("@"):
+        value = "@" + value
+
+    return value
+
+
+def get_channel_candidates():
+
+    candidates = []
+
+    channel_id = getattr(config, "CHANNEL_ID", None)
+    channel_username = getattr(
+        config,
+        "CHANNEL_USERNAME",
+        None
+    )
+
+    # First try configured numeric channel ID
+
+    if channel_id:
+
+        channel_id = str(channel_id).strip()
+
+        try:
+            if channel_id.lstrip("-").isdigit():
+                candidates.append(int(channel_id))
+            else:
+                candidates.append(channel_id)
+        except Exception:
+            candidates.append(channel_id)
+
+    # Also try username as a fallback
+
+    username = normalize_channel_username(
+        channel_username
+    )
+
+    if username and username not in candidates:
+        candidates.append(username)
+
+    return candidates
+
 
 def get_join_url():
-    username = str(config.CHANNEL_USERNAME).strip().replace("@", "")
 
-    if username:
-        return f"https://t.me/{username}"
+    username = normalize_channel_username(
+        getattr(config, "CHANNEL_USERNAME", None)
+    )
 
-    return None
+    if not username:
+        return None
 
+    if isinstance(username, int):
+        return None
+
+    return f"https://t.me/{username.lstrip('@')}"
+
+
+# ==========================================================
+# FORCE SUBSCRIPTION KEYBOARD
+# ==========================================================
 
 def get_join_keyboard():
-    join_url = get_join_url()
 
     buttons = []
 
+    join_url = get_join_url()
+
     if join_url:
+
         buttons.append([
             InlineKeyboardButton(
                 "📢 ᴊᴏɪɴ ᴜᴘᴅᴀᴛᴇ ᴄʜᴀɴɴᴇʟ",
@@ -120,66 +200,98 @@ def get_join_keyboard():
     return InlineKeyboardMarkup(buttons)
 
 
+# ==========================================================
+# FORCE SUBSCRIPTION CHECK - FIXED
+# ==========================================================
+
 async def is_subscribed(client: Client, user_id: int) -> bool:
 
-    channel_id = getattr(config, "CHANNEL_ID", None)
+    candidates = get_channel_candidates()
 
-    if not channel_id:
+    if not candidates:
+
+        logger.warning(
+            "CHANNEL_ID and CHANNEL_USERNAME are not configured!"
+        )
+
         return True
 
-    try:
-        member = await client.get_chat_member(
-            chat_id=channel_id,
-            user_id=user_id
-        )
+    for channel in candidates:
 
-        status = member.status
+        try:
 
-        # Handle Pyrogram enum and string statuses
-        status_name = getattr(status, "name", None)
-        status_value = getattr(status, "value", None)
-
-        if status_name:
-            status_name = str(status_name).lower()
-
-        elif status_value:
-            status_name = str(status_value).lower()
-
-        else:
-            status_name = str(status).lower().split(".")[-1]
-
-        allowed_statuses = {
-            "member",
-            "administrator",
-            "owner",
-            "creator"
-        }
-
-        if status_name in allowed_statuses:
             logger.info(
-                "User %s subscription verified: %s",
+                "Checking membership: user=%s channel=%s",
                 user_id,
+                channel
+            )
+
+            member = await client.get_chat_member(
+                chat_id=channel,
+                user_id=user_id
+            )
+
+            status = member.status
+
+            # Pyrogram enum compatibility
+
+            status_name = getattr(status, "name", None)
+
+            if status_name:
+                status_name = str(status_name).lower()
+            else:
+                status_name = str(status).lower().split(".")[-1]
+
+            allowed_statuses = {
+                "member",
+                "administrator",
+                "owner",
+                "creator"
+            }
+
+            if status_name in allowed_statuses:
+
+                logger.info(
+                    "SUBSCRIPTION SUCCESS: user=%s channel=%s status=%s",
+                    user_id,
+                    channel,
+                    status_name
+                )
+
+                return True
+
+            logger.warning(
+                "User %s not found as member in %s. Status=%s",
+                user_id,
+                channel,
                 status_name
             )
-            return True
 
-        logger.info(
-            "User %s is not subscribed. Status: %s",
-            user_id,
-            status_name
-        )
+            # Try the next channel identifier too.
+            continue
 
-        return False
+        except Exception as e:
 
-    except Exception as e:
-        logger.error(
-            "Subscription check failed for user %s: %s",
-            user_id,
-            e
-        )
+            logger.exception(
+                "Membership API failed for channel %s: %s",
+                channel,
+                e
+            )
 
-        return False
+            continue
 
+    logger.warning(
+        "SUBSCRIPTION FAILED for user %s. Checked channels: %s",
+        user_id,
+        candidates
+    )
+
+    return False
+
+
+# ==========================================================
+# SEND JOIN MESSAGE
+# ==========================================================
 
 async def send_join_message(message: Message):
 
@@ -190,10 +302,13 @@ async def send_join_message(message: Message):
 
 ᴜsᴇ ᴏғ ᴛʜɪs ʙᴏᴛ ʀᴇǫᴜɪʀᴇs ᴏᴜʀ ᴏғғɪᴄɪᴀʟ ᴄʜᴀɴɴᴇʟ ᴍᴇᴍʙᴇʀsʜɪᴘ.
 
+━━━━━━━━━━━━━━━━━━
+
 ➜ ᴊᴏɪɴ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ.
 ➜ ᴄʟɪᴄᴋ ᴠᴇʀɪғʏ & ᴄᴏɴᴛɪɴᴜᴇ.
 
-✦ ɪғ ʏᴏᴜ ᴀʀᴇ ᴀʟʀᴇᴀᴅʏ ᴀ ᴍᴇᴍʙᴇʀ, ᴊᴜsᴛ ᴄʟɪᴄᴋ ᴠᴇʀɪғʏ!
+✦ ᴀʟʀᴇᴀᴅʏ ᴀ ᴍᴇᴍʙᴇʀ?
+ᴊᴜsᴛ ᴄʟɪᴄᴋ ᴠᴇʀɪғʏ!
 </blockquote>
         """,
         reply_markup=get_join_keyboard()
@@ -213,9 +328,12 @@ async def start_command(client: Client, message: Message):
     user_name = html.escape(user.first_name or "Unknown")
     username = user.username
 
-    username_str = f"@{html.escape(username)}" if username else "None"
+    username_str = (
+        f"@{html.escape(username)}"
+        if username else "None"
+    )
 
-    # Register user in MongoDB
+    # Register user
 
     user_doc = await users_col.find_one(
         {"user_id": user_id}
@@ -235,9 +353,9 @@ async def start_command(client: Client, message: Message):
             upsert=True
         )
 
-        # New user log
+        # New user logger
 
-        if config.LOG_CHANNEL:
+        if getattr(config, "LOG_CHANNEL", None):
 
             log_msg = (
                 "<b>👤 ɴᴇᴡ ᴜsᴇʀ sᴛᴀʀᴛᴇᴅ ᴛʜᴇ ʙᴏᴛ!</b>\n\n"
@@ -247,13 +365,18 @@ async def start_command(client: Client, message: Message):
             )
 
             try:
+
                 await client.send_message(
                     config.LOG_CHANNEL,
                     log_msg
                 )
 
             except Exception as e:
-                logger.error("New user log failed: %s", e)
+
+                logger.error(
+                    "New user log failed: %s",
+                    e
+                )
 
     else:
 
@@ -268,20 +391,20 @@ async def start_command(client: Client, message: Message):
             upsert=True
         )
 
-    # Check subscription
+    # Force subscription
 
     if not await is_subscribed(client, user_id):
 
         await send_join_message(message)
         return
 
-    # Send welcome menu
+    # Welcome menu
 
     await message.reply_text(WELCOME_TEXT)
 
 
 # ==========================================================
-# FORCE SUBSCRIPTION CALLBACK
+# VERIFY CALLBACK - FIXED
 # ==========================================================
 
 @app.on_callback_query(filters.regex(r"^check_sub$"))
@@ -292,7 +415,12 @@ async def check_subscription_callback(
 
     user_id = callback.from_user.id
 
-    # Recheck channel membership every time button is clicked
+    # Prevent old callback errors
+
+    await callback.answer(
+        "🔄 Checking your channel membership...",
+        show_alert=False
+    )
 
     subscribed = await is_subscribed(
         client,
@@ -300,16 +428,6 @@ async def check_subscription_callback(
     )
 
     if subscribed:
-
-        await callback.answer(
-            "✅ Verification Successful!",
-            show_alert=False
-        )
-
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
 
         success_text = """
 <blockquote>
@@ -323,14 +441,25 @@ async def check_subscription_callback(
 </blockquote>
 """
 
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
         await callback.message.reply_text(
             success_text
+        )
+
+        # Send welcome menu after verification
+
+        await callback.message.reply_text(
+            WELCOME_TEXT
         )
 
     else:
 
         await callback.answer(
-            "❌ You haven't joined the channel yet! Join first and try again.",
+            "❌ Membership not detected! Join the correct channel and try again.",
             show_alert=True
         )
 
@@ -465,7 +594,7 @@ async def downloader_handler(
     if not url_pattern.match(url):
         return
 
-    # Check force subscription dynamically
+    # Check subscription on every request
 
     if not await is_subscribed(client, user_id):
 
