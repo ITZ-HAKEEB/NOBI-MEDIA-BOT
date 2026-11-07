@@ -4,14 +4,13 @@ import html
 import asyncio
 import logging
 import tempfile
-import shutil
-
-from urllib.parse import urlparse
 
 from pyrogram import Client, filters, enums
 from pyrogram.types import (
     InlineKeyboardMarkup,
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    Message,
+    CallbackQuery
 )
 
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -35,12 +34,10 @@ logger = logging.getLogger(__name__)
 # DATABASE
 # ==========================================================
 
-db_client = AsyncIOMotorClient(
-    config.MONGO_DB_URI,
-    serverSelectionTimeoutMS=10000
-)
+db_client = AsyncIOMotorClient(config.MONGO_DB_URI)
 
 db = db_client["all_downloader_bot"]
+
 users_col = db["users"]
 
 
@@ -54,24 +51,6 @@ app = Client(
     api_hash=config.API_HASH,
     bot_token=config.BOT_TOKEN,
     parse_mode=enums.ParseMode.HTML
-)
-
-
-# ==========================================================
-# SETTINGS
-# ==========================================================
-
-MAX_VIDEO_SIZE = 2 * 1024 * 1024 * 1024
-MAX_VIDEO_HEIGHT = 1080
-
-DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
-
-SUPPORTED_DOMAINS = (
-    "youtube.com",
-    "youtu.be",
-    "instagram.com",
-    "facebook.com",
-    "fb.watch"
 )
 
 
@@ -96,7 +75,7 @@ DEFAULT_WELCOME_TEXT = """
 ━━━━━━━━━━━━━━━━━━
 
 ⚡ ғᴀsᴛ ᴘʀᴏᴄᴇssɪɴɢ
-🎬 ᴜᴘ ᴛᴏ 1080ᴘ ᴠɪᴅᴇᴏ
+🎬 ʜɪɢʜ Qᴜᴀʟɪᴛʏ ᴠɪᴅᴇᴏs
 🔒 sɪᴍᴘʟᴇ & ᴇᴀsʏ ᴛᴏ ᴜsᴇ
 
 <b>➥ sᴇɴᴅ ʏᴏᴜʀ ᴠɪᴅᴇᴏ ʟɪɴᴋ!</b>
@@ -123,7 +102,6 @@ def normalize_channel(value):
     value = value.replace("https://t.me/", "")
     value = value.replace("http://t.me/", "")
     value = value.replace("t.me/", "")
-
     value = value.split("/")[0].split("?")[0]
 
     if not value:
@@ -178,7 +156,6 @@ def get_join_keyboard():
     join_url = get_join_url()
 
     if join_url:
-
         buttons.append([
             InlineKeyboardButton(
                 "📢 ᴊᴏɪɴ ᴜᴘᴅᴀᴛᴇ ᴄʜᴀɴɴᴇʟ",
@@ -228,12 +205,19 @@ async def is_subscribed(client, user_id):
                 "owner",
                 "creator"
             ):
+
+                logger.info(
+                    "User %s verified in %s",
+                    user_id,
+                    channel
+                )
+
                 return True
 
         except Exception:
 
             logger.exception(
-                "Membership check failed for %s",
+                "Membership check failed for channel %s",
                 channel
             )
 
@@ -381,7 +365,9 @@ async def check_subscription_callback(client, callback):
         """
     )
 
-    await callback.message.reply_text(WELCOME_TEXT)
+    await callback.message.reply_text(
+        WELCOME_TEXT
+    )
 
 
 # ==========================================================
@@ -477,29 +463,26 @@ async def broadcast_command(client, message):
 
 
 # ==========================================================
-# COOKIE CONFIGURATION
+# YT-DLP COOKIE CONFIGURATION
 # ==========================================================
 
 def get_ytdlp_cookie_file():
 
-    cookie_data = os.getenv(
-        "YTDLP_COOKIES",
-        ""
-    ).strip()
+    # Optional cookie contents supplied through Heroku Config Vars.
+    # Use only your own account's cookies and keep them private.
+
+    cookie_data = os.getenv("YTDLP_COOKIES", "").strip()
 
     if cookie_data:
 
-        cookie_path = "/tmp/nobi_cookies.txt"
+        cookie_path = "/tmp/nobi_instagram_cookies.txt"
 
-        with open(
-            cookie_path,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
+        with open(cookie_path, "w", encoding="utf-8") as file:
             file.write(cookie_data)
 
         return cookie_path
+
+    # Alternatively, use a securely provided cookie file path.
 
     cookie_path = os.getenv(
         "YTDLP_COOKIES_FILE",
@@ -513,32 +496,6 @@ def get_ytdlp_cookie_file():
 
 
 # ==========================================================
-# URL VALIDATION
-# ==========================================================
-
-def is_supported_url(url):
-
-    try:
-
-        parsed = urlparse(url)
-
-        if parsed.scheme not in ("http", "https"):
-            return False
-
-        hostname = (parsed.hostname or "").lower()
-
-        return any(
-            hostname == domain
-            or hostname.endswith("." + domain)
-            for domain in SUPPORTED_DOMAINS
-        )
-
-    except Exception:
-
-        return False
-
-
-# ==========================================================
 # DOWNLOAD FUNCTION
 # ==========================================================
 
@@ -547,61 +504,24 @@ def download_media(url, download_dir):
     cookie_file = get_ytdlp_cookie_file()
 
     ydl_opts = {
-
-        # HD video + best available audio
-        "format": (
-            "bestvideo[height<=1080][ext=mp4]"
-            "+bestaudio[ext=m4a]"
-            "/best[height<=1080][ext=mp4]"
-            "/best[height<=1080]"
-            "/best"
-        ),
-
-        "format_sort": [
-            "res:1080",
-            "vcodec:h264",
-            "acodec:m4a"
-        ],
-
-        # Merge video and audio into MP4
-        "merge_output_format": "mp4",
-
-        # Download speed
-        "concurrent_fragment_downloads": 4,
-
-        "retries": 5,
-        "fragment_retries": 5,
-        "extractor_retries": 3,
-
-        "socket_timeout": 30,
-
-        "noplaylist": True,
-
-        "quiet": True,
-        "no_warnings": True,
-
-        "ignoreerrors": False,
-
-        "overwrites": True,
-
-        "continuedl": True,
-
+        "format": "best[ext=mp4]/best",
         "outtmpl": os.path.join(
             download_dir,
             "%(id)s.%(ext)s"
         ),
-
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": False,
         "http_headers": {
-
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
             )
-        },
-
-        "postprocessor_args": [],
-
-        "windowsfilenames": False
+        }
     }
 
     if cookie_file:
@@ -617,119 +537,72 @@ def download_media(url, download_dir):
         if not info:
             raise Exception("No downloadable media found.")
 
-        # Prefer the final merged file path.
-        file_path = info.get("filepath")
+        file_path = ydl.prepare_filename(info)
 
-        if file_path and os.path.isfile(file_path):
-            return file_path
+        if not os.path.isfile(file_path):
 
-        # Find the downloaded file by media ID.
-        media_id = info.get("id")
+            # Handle a possible alternate extension.
+            base = os.path.splitext(file_path)[0]
 
-        if media_id:
-
-            matches = []
-
-            for name in os.listdir(download_dir):
-
-                full_path = os.path.join(
-                    download_dir,
-                    name
-                )
-
-                if (
-                    os.path.isfile(full_path)
-                    and name.startswith(str(media_id) + ".")
-                ):
-
-                    matches.append(full_path)
+            matches = [
+                os.path.join(download_dir, name)
+                for name in os.listdir(download_dir)
+                if os.path.splitext(name)[0] == os.path.basename(base)
+            ]
 
             if matches:
+                file_path = matches[0]
 
-                mp4_files = [
-                    path for path in matches
-                    if path.lower().endswith(".mp4")
-                ]
+        if not os.path.isfile(file_path):
+            raise Exception("Downloaded file was not found.")
 
-                return (
-                    mp4_files[0]
-                    if mp4_files
-                    else matches[0]
-                )
-
-        raise Exception("Downloaded file was not found.")
+        return file_path
 
 
 # ==========================================================
-# ERROR HANDLER
+# ERROR MESSAGE HELPER
 # ==========================================================
 
 def get_download_error(error):
 
     error = str(error)
+
     lower_error = error.lower()
-
-    if "private" in lower_error:
-
-        return "This video is private or unavailable."
-
-    if any(word in lower_error for word in (
-        "sign in",
-        "login required",
-        "cookies",
-        "authentication"
-    )):
-
-        return (
-            "This content requires authorized access. "
-            "Please check that the video is publicly accessible."
-        )
 
     if any(word in lower_error for word in (
         "rate-limit",
         "rate limit",
-        "too many requests",
-        "http error 429"
+        "login required",
+        "cookies",
+        "requested content is not available"
     )):
 
         return (
-            "The platform has temporarily limited requests. "
-            "Please try again later."
+            "Instagram is requiring login or has temporarily "
+            "restricted this request.\n\n"
+            "Please try again later. If the content requires "
+            "login, configure your own authorized cookies securely."
+        )
+
+    if "private" in lower_error:
+
+        return (
+            "This content is private or unavailable to this account."
         )
 
     if "unsupported url" in lower_error:
 
-        return "This link is not supported."
-
-    if any(word in lower_error for word in (
-        "ffmpeg",
-        "ffprobe",
-        "merger"
-    )):
-
         return (
-            "FFmpeg is missing or not configured correctly. "
-            "Please check your Heroku build."
+            "This link is not supported by the current downloader."
         )
 
-    if any(word in lower_error for word in (
-        "nsig",
-        "javascript",
-        "challenge",
-        "signature"
-    )):
+    if "ffmpeg" in lower_error:
 
         return (
-            "YouTube extraction needs an updated yt-dlp "
-            "and a supported JavaScript runtime. "
-            "Please update the deployment dependencies."
+            "The media requires FFmpeg. Please check your Heroku build."
         )
 
-    if "disk" in lower_error or "no space" in lower_error:
-
-        return "Server storage is full. Please try again later."
-
-    return error[:1000]
+    return error[:1200]
 
 
 # ==========================================================
@@ -762,18 +635,14 @@ async def downloader_handler(client, message):
     if not url_pattern.match(url):
         return
 
-    if not is_supported_url(url):
-
-        await message.reply_text(
-            "❌ Please send a valid YouTube, Instagram or Facebook link."
-        )
-
-        return
+    # Subscription check
 
     if not await is_subscribed(client, user_id):
 
         await send_join_message(message)
         return
+
+    # Processing status
 
     status_msg = await message.reply_text(
         """
@@ -781,75 +650,55 @@ async def downloader_handler(client, message):
 📥 <b>ᴘʀᴏᴄᴇssɪɴɢ ʏᴏᴜʀ ᴠɪᴅᴇᴏ...</b>
 
 ✦ ʟɪɴᴋ ᴄʜᴇᴄᴋɪɴɢ
-✦ ʜᴅ ᴍᴇᴅɪᴀ ᴘʀᴏᴄᴇssɪɴɢ
+✦ ᴍᴇᴅɪᴀ ᴘʀᴏᴄᴇssɪɴɢ
 
-⚡ ᴘʟᴇᴀsᴇ ᴡᴀɪᴛ!
+ᴘʟᴇᴀsᴇ ᴡᴀɪᴛ!
 </blockquote>
         """
     )
 
     try:
-
         await message.react("👀")
-
     except Exception:
         pass
+
+    download_dir = "downloads"
+
+    os.makedirs(
+        download_dir,
+        exist_ok=True
+    )
 
     file_path = None
 
     try:
 
-        async with DOWNLOAD_SEMAPHORE:
+        loop = asyncio.get_running_loop()
 
-            # Each download gets its own temporary directory.
-            with tempfile.TemporaryDirectory(
-                prefix="nobi_"
-            ) as download_dir:
+        file_path = await loop.run_in_executor(
+            None,
+            download_media,
+            url,
+            download_dir
+        )
 
-                loop = asyncio.get_running_loop()
+        if not file_path or not os.path.isfile(file_path):
 
-                file_path = await loop.run_in_executor(
-                    None,
-                    download_media,
-                    url,
-                    download_dir
-                )
+            raise Exception("Download file not found.")
 
-                if not file_path or not os.path.isfile(file_path):
+        await status_msg.edit_text(
+            "📤 <b>ᴜᴘʟᴏᴀᴅɪɴɢ ʏᴏᴜʀ ᴠɪᴅᴇᴏ...</b>"
+        )
 
-                    raise Exception("Download file not found.")
+        await message.reply_video(
+            video=file_path,
+            caption=(
+                "✅ <b>ᴅᴏᴡɴʟᴏᴀᴅᴇᴅ sᴜᴄᴄᴇssғᴜʟʟʏ!</b>\n\n"
+                "✦ ᴘᴏᴡᴇʀᴇᴅ ʙʏ ɴᴏʙɪ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ"
+            )
+        )
 
-                file_size = os.path.getsize(file_path)
-
-                if file_size > MAX_VIDEO_SIZE:
-
-                    raise Exception(
-                        "Video is too large to upload through this bot."
-                    )
-
-                if not file_path.lower().endswith(
-                    (".mp4", ".mkv", ".webm", ".mov")
-                ):
-
-                    raise Exception(
-                        "Downloaded format is not supported for video upload."
-                    )
-
-                await status_msg.edit_text(
-                    "📤 <b>ᴜᴘʟᴏᴀᴅɪɴɢ ʜᴅ ᴠɪᴅᴇᴏ...</b>"
-                )
-
-                await message.reply_video(
-                    video=file_path,
-                    caption=(
-                        "✅ <b>ᴅᴏᴡɴʟᴏᴀᴅᴇᴅ sᴜᴄᴄᴇssғᴜʟʟʏ!</b>\n\n"
-                        "🎬 <b>Quality:</b> Best available up to 1080p\n"
-                        "✦ ᴘᴏᴡᴇʀᴇᴅ ʙʏ ɴᴏʙɪ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ"
-                    ),
-                    supports_streaming=True
-                )
-
-                await status_msg.delete()
+        await status_msg.delete()
 
     except Exception as e:
 
@@ -870,10 +719,16 @@ async def downloader_handler(client, message):
             )
 
         except Exception:
+            logger.exception("Could not edit download status")
 
-            logger.exception(
-                "Could not edit download status"
-            )
+    finally:
+
+        if file_path and os.path.isfile(file_path):
+
+            try:
+                os.remove(file_path)
+            except Exception:
+                logger.exception("Could not remove downloaded file")
 
 
 # ==========================================================
